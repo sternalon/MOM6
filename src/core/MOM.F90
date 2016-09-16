@@ -217,6 +217,9 @@ type, public :: MOM_control_struct
 
   real :: Hmix                       !< diagnostic mixed layer thickness (meter) when
                                      !! bulk mixed layer is not used.
+  logical :: usehmix                 !< If true, surface properties (e.g., SST) are averaged
+                                     !! over a distance given by HMIX_SFC_PROP. This parameter
+                                     !! is valid just when BULKMIXLAYER is defined.
   real :: missing=-1.0e34            !< missing data value for masked fields
 
   ! Flags needed to reach between start and finish phases of initialization
@@ -926,6 +929,10 @@ subroutine step_MOM(fluxes, state, Time_start, time_interval, CS)
         call vchksum(CS%vhtr,"Post-mixedlayer_restrat vhtr", G%HI, haloshift=0)
       endif
     endif
+ 
+    ! Whenever thickness changes let the diag manager know, target grids
+    ! for vertical remapping may need to be regenerated.
+    call diag_update_target_grids(CS%diag)
 
     if (CS%useMEKE) call step_forward_MEKE(CS%MEKE, h, CS%VarMix%SN_u, CS%VarMix%SN_v, &
                                            CS%visc, dt, G, GV, CS%MEKE_CSp, CS%uhtr, CS%vhtr)
@@ -1154,7 +1161,7 @@ subroutine step_MOM(fluxes, state, Time_start, time_interval, CS)
       if (Time_local + set_time(int(0.5*dt_therm)) > CS%Z_diag_time) then
         call enable_averaging(real(time_type_to_real(CS%Z_diag_interval)), &
                               CS%Z_diag_time, CS%diag)
-        call calculate_Z_diag_fields(u, v, h, CS%dt_trans, &
+        call calculate_Z_diag_fields(u, v, h, ssh,CS%dt_trans, &
                                      G, GV, CS%diag_to_Z_CSp)
         CS%Z_diag_time = CS%Z_diag_time + CS%Z_diag_interval
         call disable_averaging(CS%diag)
@@ -1529,11 +1536,28 @@ subroutine initialize_MOM(Time, param_file, dirs, CS, Time_in)
                  "case is the largest integer multiple of the coupling \n"//&
                  "timestep that is less than or equal to DT_THERM.", default=.false.)
 
+  if (CS%bulkmixedlayer) then
+     call get_param(param_file, "MOM", "USE_HMIX_SFC_PROP", CS%usehmix, &
+                 "Applied only if BULKMIXLAYER is used. If TRUE, surface properties \n"//& 
+                 "like SST, SSS, density and velocities are averaged over \n"//&
+                 "a distance given by HMIX_SFC_PROP. These averaged fields are \n"//&
+                 "passed to the surface state structure, which is then used \n"//&
+                 "to, for example, compute melting under an ice shelf.", default=.false.)
+     if(CS%usehmix) then
+        call get_param(param_file, "MOM", "HMIX_SFC_PROP", CS%Hmix, &
+                 "If USE_HMIX_SFC_PROP is true, HMIX_SFC_PROP is the depth \n"//&
+                 "over which to average to find surface properties like \n"//&
+                 "SST, SSS,  density are surface velocities.", &
+                 units="m", default=1.0)
+     endif
+
+  endif
+
   if (.not.CS%bulkmixedlayer) then
     call get_param(param_file, "MOM", "HMIX_SFC_PROP", CS%Hmix, &
                  "If BULKMIXEDLAYER is false, HMIX_SFC_PROP is the depth \n"//&
                  "over which to average to find surface properties like \n"//&
-                 "SST and SSS or density (but not surface velocities).", &
+                 "SST, SSS,  density are surface velocities.", &
                  units="m", default=1.0)
   endif
   call get_param(param_file, "MOM", "MIN_Z_DIAG_INTERVAL", Z_diag_int, &
@@ -1938,7 +1962,7 @@ subroutine initialize_MOM(Time, param_file, dirs, CS, Time_in)
   call set_axes_info(G, GV, param_file, diag)
 
   ! Whenever thickness changes let the diag manager know, target grids
-  ! for vertical remapping may need to be regenerated. This needs to
+  ! for vertical remapping may need to be regenerated. 
   call diag_update_target_grids(diag)
 
   call cpu_clock_begin(id_clock_MOM_init)
@@ -2855,21 +2879,26 @@ subroutine calculate_surface_state(state, u, v, h, ssh, G, GV, CS, p_atm)
   real, optional, pointer, dimension(:,:)                       :: p_atm  !< atmospheric pressure (Pascal)
 
   ! local
-  real :: depth(SZI_(G))    ! distance from the surface (meter)
-  real :: depth_ml          ! depth over which to average to
-                            ! determine mixed layer properties (meter)
-  real :: dh                ! thickness of a layer within mixed layer (meter)
-  real :: mass              ! mass per unit area of a layer (kg/m2)
+  real :: hu(SZIB_(G),SZJ_(G),SZK_(G))! layer thickness (m or kg/m2) at u points 
+  real :: hv(SZI_(G),SZJB_(G),SZK_(G))! layer thickness (m or kg/m2) at v points 
+  real :: depth(SZI_(G))              ! distance from the surface (meter)
+  real :: depth_ml                    ! depth over which to average to
+                                      ! determine mixed layer properties (meter)
+  real :: dh                          ! thickness of a layer within mixed layer (meter)
+  real :: mass                        ! mass per unit area of a layer (kg/m2)
 
   real :: IgR0
   integer :: i, j, k, is, ie, js, je, nz, numberOfErrors
-  integer :: isd, ied, jsd, jed
+  integer :: isd, ied, jsd, jed 
+  integer :: iscB, iecB, jscB, jecB, isdB, iedB, jsdB, jedB
   logical :: localError
   character(240) :: msg
 
   call callTree_enter("calculate_surface_state(), MOM.F90")
   is  = G%isc ; ie  = G%iec ; js  = G%jsc ; je  = G%jec ; nz = G%ke
   isd = G%isd ; ied = G%ied ; jsd = G%jsd ; jed = G%jed
+  iscB = G%iscB ; iecB = G%iecB; jscB = G%jscB ; jecB = G%jecB
+  isdB = G%isdB ; iedB = G%iedB; jsdB = G%jsdB ; jedB = G%jedB
 
   state%sea_lev => ssh
 
@@ -2880,9 +2909,11 @@ subroutine calculate_surface_state(state, u, v, h, ssh, G, GV, CS, p_atm)
     enddo ; enddo
   endif ; endif
 
-  if (CS%bulkmixedlayer) then
+  if (CS%bulkmixedlayer .and. .not. CS%usehmix) then
     state%SST => CS%tv%T(:,:,1)
     state%SSS => CS%tv%S(:,:,1)
+    state%u => u(:,:,1)
+    state%v => v(:,:,1)
     nullify(state%sfc_density)
     if (associated(CS%tv%Hml)) state%Hml => CS%tv%Hml
   else
@@ -2900,10 +2931,17 @@ subroutine calculate_surface_state(state, u, v, h, ssh, G, GV, CS, p_atm)
       endif
       nullify(state%SST) ; nullify(state%SSS)
     endif
+    if (.not.associated(state%u)) then
+       allocate(state%u(isdB:iedB,jsd:jed)) ; state%u(:,:) = 0.0
+    endif
+    if (.not.associated(state%v)) then
+       allocate(state%v(isd:ied,jsdB:jedB)) ; state%v(:,:) = 0.0
+    endif
+
     if (.not.associated(state%Hml)) allocate(state%Hml(isd:ied,jsd:jed))
 
     depth_ml = CS%Hmix
-  !   Determine the mean properties of the uppermost depth_ml fluid.
+  !   Determine the mean tracer properties of the uppermost depth_ml fluid.
 !$OMP parallel do default(none) shared(is,ie,js,je,nz,CS,state,h,depth_ml,GV) private(depth,dh)
     do j=js,je
       do i=is,ie
@@ -2944,10 +2982,67 @@ subroutine calculate_surface_state(state, u, v, h, ssh, G, GV, CS, p_atm)
         state%Hml(i,j) = depth(i)
       enddo
     enddo ! end of j loop
-  endif                                             ! end BULKMIXEDLAYER
 
-  state%u => u(:,:,1)
-  state%v => v(:,:,1)
+ !   Determine the mean velocities in the uppermost depth_ml fluid.
+!$OMP parallel do default(none) shared(is,ie,js,je,nz,CS,state,h,depth_ml,GV) private(depth,dh)
+    do j=js,je
+      
+      do i=is,ie
+        depth(i) = 0.0
+        state%v(i,j) = 0.0
+        hv(i,j,:) = 0.5 * (h(i,j,:) + h(i,j+1,:))
+      enddo
+
+      do k=1,nz ; do i=is,ie
+        if (depth(i) + hv(i,j,k)*GV%H_to_m < depth_ml) then
+          dh = hv(i,j,k)*GV%H_to_m
+        elseif (depth(i) < depth_ml) then
+          dh = depth_ml - depth(i)
+        else
+          dh = 0.0
+        endif
+        state%v(i,j) = state%v(i,j) + dh * v(i,j,k)
+        depth(i) = depth(i) + dh
+      enddo ; enddo
+  ! Calculate the average properties of the mixed layer depth.
+      do i=is,ie
+        if (depth(i) < GV%H_subroundoff*GV%H_to_m) &
+            depth(i) = GV%H_subroundoff*GV%H_to_m
+        state%v(i,j) = state%v(i,j) / depth(i)
+      enddo
+    enddo ! end of j loop
+
+!$OMP parallel do default(none) shared(is,ie,js,je,nz,CS,state,h,depth_ml,GV) private(depth,dh)
+    do j=js,je
+ 
+      do i=is,ie
+        depth(i) = 0.0
+        state%u(i,j) = 0.0
+        hu(i,j,:) = 0.5 * (h(i,j,:) + h(i+1,j,:))
+      enddo
+
+      do k=1,nz ; do i=is,ie
+        if (depth(i) + hu(i,j,k)*GV%H_to_m < depth_ml) then
+          dh = hu(i,j,k)*GV%H_to_m
+        elseif (depth(i) < depth_ml) then
+          dh = depth_ml - depth(i)
+        else
+          dh = 0.0
+        endif
+        state%u(i,j) = state%u(i,j) + dh * u(i,j,k)
+        depth(i) = depth(i) + dh
+      enddo ; enddo
+  ! Calculate the average properties of the mixed layer depth.
+      do i=is,ie
+        if (depth(i) < GV%H_subroundoff*GV%H_to_m) &
+            depth(i) = GV%H_subroundoff*GV%H_to_m
+        state%u(i,j) = state%u(i,j) / depth(i)
+      enddo
+    enddo ! end of j loop
+  endif                                              ! end BULKMIXEDLAYER
+
+  !state%u => u(:,:,1)
+  !state%v => v(:,:,1)
   state%frazil => CS%tv%frazil
   state%TempxPmE => CS%tv%TempxPmE
   state%internal_heat => CS%tv%internal_heat

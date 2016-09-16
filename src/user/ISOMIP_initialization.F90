@@ -108,7 +108,7 @@ subroutine ISOMIP_initialize_topography(D, G, param_file, max_depth)
   if (is_2D) then
     do j=js,je ; do i=is,ie
       ! 2D setup
-      xtil = G%geoLatT(i,j)*1.0e3/xbar 
+      xtil = G%geoLonT(i,j)*1.0e3/xbar 
       !xtil = 450*1.0e3/xbar
       bx = b0+b2*xtil**2 + b4*xtil**4 + b6*xtil**6
       !by = (dc/(1.+exp(-2.*(G%geoLatT(i,j)*1.0e3- ly/2. - wc)/fc))) + &
@@ -127,18 +127,18 @@ subroutine ISOMIP_initialize_topography(D, G, param_file, max_depth)
     do j=js,je ; do i=is,ie
       ! 3D setup       
       ! #### TEST #######
-      !if (G%geoLatT(i,j)<500.) then
+      !if (G%geoLonT(i,j)<500.) then
       !  xtil = 500.*1.0e3/xbar
       !else
-      !  xtil = G%geoLatT(i,j)*1.0e3/xbar 
+      !  xtil = G%geoLonT(i,j)*1.0e3/xbar 
       !endif
       ! ##### TEST #####
       
-      xtil = G%geoLatT(i,j)*1.0e3/xbar 
+      xtil = G%geoLonT(i,j)*1.0e3/xbar 
 
       bx = b0+b2*xtil**2 + b4*xtil**4 + b6*xtil**6
-      by = (dc/(1.+exp(-2.*(G%geoLonT(i,j)*1.0e3- ly/2. - wc)/fc))) + &
-              (dc/(1.+exp(2.*(G%geoLonT(i,j)*1.0e3- ly/2. + wc)/fc)))
+      by = (dc/(1.+exp(-2.*(G%geoLatT(i,j)*1.0e3- ly/2. - wc)/fc))) + &
+              (dc/(1.+exp(2.*(G%geoLatT(i,j)*1.0e3- ly/2. + wc)/fc)))
 
       D(i,j) = -max(bx+by,-bmax)
       if (D(i,j) > max_depth) D(i,j) = max_depth
@@ -437,8 +437,8 @@ subroutine ISOMIP_initialize_sponges(G, GV, tv, PF, use_ALE, CSp, ACSp)
                                     ! positive upward, in m.
   real :: min_depth, dummy1, z, delta_h
   real :: damp, rho_dummy, min_thickness, rho_tmp, xi0
-  character(len=40) :: verticalCoordinate, filename, state_file, inputdir
-  character(len=40) :: temp_var, salt_var, eta_var
+  character(len=40) :: verticalCoordinate, filename, state_file
+  character(len=40) :: temp_var, salt_var, eta_var, inputdir
 
   character(len=40)  :: mod = "ISOMIP_initialize_sponges" ! This subroutine's name.
   integer :: i, j, k, is, ie, js, je, isd, ied, jsd, jed, nz
@@ -486,10 +486,10 @@ subroutine ISOMIP_initialize_sponges(G, GV, tv, PF, use_ALE, CSp, ACSp)
   !  and mask2dT is 1.  
 
    do i=is,ie; do j=js,je
-      if (G%geoLatT(i,j) >= 790.0 .AND. G%geoLatT(i,j) <= 800.0) then
+      if (G%geoLonT(i,j) >= 790.0 .AND. G%geoLonT(i,j) <= 800.0) then
 
   ! 1 / day
-        dummy1=(G%geoLatT(i,j)-790.0)/(800.0-790.0)
+        dummy1=(G%geoLonT(i,j)-790.0)/(800.0-790.0)
         damp = 1.0/TNUDG * max(0.0,dummy1)
 
       else ; damp=0.0
@@ -604,10 +604,14 @@ subroutine ISOMIP_initialize_sponges(G, GV, tv, PF, use_ALE, CSp, ACSp)
        ! 1) Read eta, salt and temp from IC file
        call get_param(PF, mod, "INPUTDIR", inputdir, default=".")
        inputdir = slasher(inputdir)
+       ! GM: get two different files, one with temp and one with salt values
+       ! this is work around to avoid having wrong values near the surface
+       ! because of the FIT_SALINITY option. To get salt values right in the
+       ! sponge, FIT_SALINITY=False. The oposite is true for temp. One can 
+       ! combined the *correct* temp and salt values in one file instead.
        call get_param(PF, mod, "ISOMIP_SPONGE_FILE", state_file, &
-                 "The name of the file with the state to damp toward.", &
-                 fail_if_missing=.true.)
-
+                 "The name of the file with temps., salts. and interfaces to \n"// &
+                 " damp toward.", fail_if_missing=.true.)
        call get_param(PF, mod, "SPONGE_PTEMP_VAR", temp_var, &
                  "The name of the potential temperature variable in \n"//&
                  "SPONGE_STATE_FILE.", default="Temp")
@@ -618,12 +622,10 @@ subroutine ISOMIP_initialize_sponges(G, GV, tv, PF, use_ALE, CSp, ACSp)
                  "The name of the interface height variable in \n"//&
                  "SPONGE_STATE_FILE.", default="eta")
        
+       !read temp and eta
        filename = trim(inputdir)//trim(state_file)
-
        if (.not.file_exists(filename, G%Domain)) &
           call MOM_error(FATAL, " ISOMIP_initialize_sponges: Unable to open "//trim(filename))
-       
-       !call read_data("",eta_var,eta(:,:,:), domain=G%Domain%mpp_domain)
        call read_data(filename,eta_var,eta(:,:,:), domain=G%Domain%mpp_domain)
        call read_data(filename,temp_var,T(:,:,:), domain=G%Domain%mpp_domain)
        call read_data(filename,salt_var,S(:,:,:), domain=G%Domain%mpp_domain)
