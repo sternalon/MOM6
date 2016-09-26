@@ -510,6 +510,14 @@ subroutine shelf_calc_flux(state, fluxes, Time, time_step, CS)
 
   iDens = 1.0/CS%density_ocean_avg
 
+  ! GM, zero some fields of the ice shelf structure (ice_shelf_CS)
+  ! these fields are already set to zero during initialization
+  ! However, they seem to be changed somewhere and, for diagnostic 
+  ! reasons, it is better to set them to zero again.
+  CS%tflux_shelf(:,:) = 0.0; CS%exch_vel_t(:,:) = 0.0
+  CS%lprec(:,:) = 0.0; CS%exch_vel_s(:,:) = 0.0
+  CS%salt_flux(:,:) = 0.0; CS%t_flux(:,:) = 0.0
+  CS%tfreeze(:,:) = 0.0
 
   if (CS%shelf_mass_is_dynamic .and. CS%override_shelf_movement) & 
                                   call update_shelf_mass(CS, Time)
@@ -545,6 +553,8 @@ subroutine shelf_calc_flux(state, fluxes, Time, time_step, CS)
 
           fluxes%ustar_shelf(i,j)= sqrt(CS%cdrag*((u_at_h**2.0 + v_at_h**2.0) +&
                                                     CS%utide(i,j)**2))
+
+
           ustar_h = MAX(CS%ustar_bg, fluxes%ustar_shelf(i,j))
 
           fluxes%ustar_shelf(i,j) = ustar_h
@@ -759,32 +769,42 @@ subroutine shelf_calc_flux(state, fluxes, Time, time_step, CS)
     enddo ! i-loop
   enddo ! j-loop
 
-  do j=js,je
-    do i=is,ie
-    ! GM: set lprec (therefore melting) to zero above a cutoff pressure
-    ! (CS%Rho0*CS%cutoff_depth*CS%g_Earth) this is needed for the isomip 
-    ! test case.
-        
-      if ((CS%g_Earth * CS%mass_shelf(i,j)) < CS%Rho0*CS%cutoff_depth* &
-         CS%g_Earth) CS%lprec(i,j) = 0.0
-    ! avoid negative fluxes
-    !  CS%lprec(i,j) = MAX(CS%lprec(i,j),0.0)
-      
-    enddo ! i-loop
-  enddo ! j-loop
-
   ! CS%lprec = precipitating liquid water into the ocean ( kg/(m^2 s) )
   ! melt in m/year 
   !fluxes%iceshelf_melt = CS%lprec  * (86400.0*365.0/CS%density_ice)
-  ! Use rho_fw for ISOMIP experiments
-  fluxes%iceshelf_melt = CS%lprec  * (86400.0*365.0/rho_fw) 
+  ! Use rhoefw for ISOMIP experiments
+  fluxes%iceshelf_melt = CS%lprec  * (86400.0*365.0/rho_fw)
+
+  do j=js,je
+    do i=is,ie
+      ! GM: set melt to zero above a cutoff pressure
+      ! (CS%Rho0*CS%cutoff_depth*CS%g_Earth) this is needed for the isomip 
+      ! test case.
+        
+      if ((CS%g_Earth * CS%mass_shelf(i,j)) < CS%Rho0*CS%cutoff_depth* &
+         CS%g_Earth) fluxes%iceshelf_melt(i,j) = 0.0
+     
+      !GM, safety check
+      if (abs(fluxes%iceshelf_melt(i,j))>0.0) then
+          if (fluxes%ustar_shelf(i,j) == 0.0) then
+             write(*,*)'Something is wrong at i,j',i,j
+             call MOM_error(FATAL, &
+                  "shelf_calc_flux: |melt| > 0 and star_shelf = 0.")
+          endif
+      endif 
+    enddo ! i-loop
+  enddo ! j-loop
+
   ! mass flux (kg/s), part of ISOMIP diags.
   ! first, allocate mass_flux. This is probably not the best way to do this.
   !im,jm=SHAPE(CS%lprec) 
-  ALLOCATE ( mass_flux(G%ied,G%jed) )
-  mass_flux = (CS%lprec) * CS%area_shelf_h  
+  ALLOCATE ( mass_flux(G%ied,G%jed) ); mass_flux(:,:) = 0.0
+  mass_flux = (CS%lprec) * CS%area_shelf_h 
+ 
   if (CS%DEBUG) then
-   call hchksum (CS%h_shelf, "melt rate", G%HI, haloshift=0)
+   call hchksum (fluxes%iceshelf_melt, "melt rate", G%HI, haloshift=0)
+   call hchksum (fluxes%ustar_shelf, "ustar_shelf calc", G%HI, haloshift=0)
+   call hchksum (state%Hml, "Hml", G%HI, haloshift=0)
   endif
 
   if (CS%shelf_mass_is_dynamic) then
@@ -793,7 +813,7 @@ subroutine shelf_calc_flux(state, fluxes, Time, time_step, CS)
     call pass_var(CS%mass_shelf, G%domain)
     call cpu_clock_end(id_clock_pass)
   endif
-  
+
   call add_shelf_flux(G, CS, state, fluxes)
 
   ! now the thermodynamic data is passed on... time to update the ice dynamic quantities
@@ -844,7 +864,8 @@ subroutine shelf_calc_flux(state, fluxes, Time, time_step, CS)
    if (CS%id_area_shelf_h > 0) call post_data(CS%id_area_shelf_h, CS%area_shelf_h, CS%diag)
    if (CS%id_ustar_shelf > 0) call post_data(CS%id_ustar_shelf, fluxes%ustar_shelf, CS%diag)
    ! Use freshwater density fotr ISOMIP exps.
-   if (CS%id_melt > 0) call post_data(CS%id_melt, (CS%lprec) * (86400.0*365.0/rho_fw), CS%diag)
+   !if (CS%id_melt > 0) call post_data(CS%id_melt, (CS%lprec) * (86400.0*365.0/rho_fw), CS%diag)
+   if (CS%id_melt > 0) call post_data(CS%id_melt, fluxes%iceshelf_melt, CS%diag)
    !if (CS%id_melt > 0) call post_data(CS%id_melt, (CS%lprec) * (86400.0*365.0/CS%density_ice), CS%diag)
    if (CS%id_thermal_driving > 0) call post_data(CS%id_thermal_driving, (state%sst-CS%tfreeze), CS%diag)
    if (CS%id_haline_driving > 0) call post_data(CS%id_haline_driving, (state%sss - Sbdry), CS%diag)
@@ -923,6 +944,7 @@ subroutine add_shelf_flux(G, CS, state, fluxes)
   else
     ! This is needed because rigidity is potentially modified in the coupler. Reset
     ! in the ice shelf cavity: MJH
+
     do j=isd,jed ; do i=isd,ied-1 ! changed stride
       fluxes%rigidity_ice_u(I,j) = (CS%kv_ice / CS%density_ice) * &
                     min(CS%mass_shelf(i,j), CS%mass_shelf(i+1,j))
@@ -940,6 +962,10 @@ subroutine add_shelf_flux(G, CS, state, fluxes)
     endif
     if (associated(state%tauy_shelf)) then
       call vchksum(state%tauy_shelf, "tauy_shelf", G%HI, haloshift=0)
+      call vchksum(fluxes%rigidity_ice_u, "rigidity_ice_u", G%HI, haloshift=0)
+      call vchksum(fluxes%rigidity_ice_v, "rigidity_ice_v", G%HI, haloshift=0)
+      call vchksum(fluxes%frac_shelf_u, "frac_shelf_u", G%HI, haloshift=0)
+      call vchksum(fluxes%frac_shelf_v, "frac_shelf_v", G%HI, haloshift=0)
     endif
   endif
 
@@ -967,7 +993,12 @@ subroutine add_shelf_flux(G, CS, state, fluxes)
       if ((asv1 + asv2 > 0.0) .and. associated(state%tauy_shelf)) &
         tauy2 = (asv1 * state%tauy_shelf(i,j-1)**2 + &
                  asv2 * state%tauy_shelf(i,j)**2  ) / (asv1 + asv2)
-      fluxes%ustar(i,j) = MAX(CS%ustar_bg, sqrt(Irho0 * sqrt(taux2 + tauy2)))
+      
+      ! GM: melting is computed using ustar_shelf (and not ustar), which has already
+      ! been passed, so believe we do not need to update fluxes%ustar.
+      !fluxes%ustar(i,j) = MAX(CS%ustar_bg, sqrt(Irho0 * sqrt(taux2 + tauy2)))
+
+
       if (associated(fluxes%sw)) fluxes%sw(i,j) = 0.0
       if (associated(fluxes%lw)) fluxes%lw(i,j) = 0.0
       if (associated(fluxes%latent)) fluxes%latent(i,j) = 0.0
@@ -979,6 +1010,7 @@ subroutine add_shelf_flux(G, CS, state, fluxes)
           fluxes%evap(i,j) = frac_area*CS%lprec(i,j)*CS%flux_factor
         endif
       endif
+
 
       ! Add frazil formation diagnosed by the ocean model (J m-2) in the
       ! form of surface layer evaporation (kg m-2 s-1). Update lprec in the
@@ -1000,9 +1032,6 @@ subroutine add_shelf_flux(G, CS, state, fluxes)
 
     endif
   enddo ; enddo
-  if (CS%debug) then
-    call hchksum(fluxes%ustar_shelf, "ustar_shelf", G%HI, haloshift=0)
-  endif
   
   ! If the shelf mass is changing, the fluxes%rigidity_ice_[uv] needs to be
   ! updated here.
@@ -1593,12 +1622,14 @@ subroutine initialize_ice_shelf(param_file, ocn_grid, Time, CS, diag, fluxes, Ti
     call register_restart_field(CS%taub_beta_eff_bilinear, vd, .true., CS%restart_CSp)  
   endif
 
-  if (.not. solo_ice_sheet) then
-    vd = var_desc("ustar_shelf","m s-1","Friction velocity under ice shelves",z_grid='1')
-    call register_restart_field(fluxes%ustar_shelf, vd, .true., CS%restart_CSp)
-    vd = var_desc("iceshelf_melt","m year-1","Ice Shelf Melt Rate",z_grid='1')
-    call register_restart_field(fluxes%iceshelf_melt, vd, .true., CS%restart_CSp)
-  endif
+! GM - I think we do not need to save ustar_shelf and iceshelf_melt in the restart file
+
+!  if (.not. solo_ice_sheet) then
+!    vd = var_desc("ustar_shelf","m s-1","Friction velocity under ice shelves",z_grid='1')
+!    call register_restart_field(fluxes%ustar_shelf, vd, .true., CS%restart_CSp)
+!    vd = var_desc("iceshelf_melt","m year-1","Ice Shelf Melt Rate",z_grid='1')
+!    call register_restart_field(fluxes%iceshelf_melt, vd, .true., CS%restart_CSp)
+!  endif
  
   CS%restart_output_dir = dirs%restart_output_dir
 
@@ -1648,8 +1679,6 @@ subroutine initialize_ice_shelf(param_file, ocn_grid, Time, CS, diag, fluxes, Ti
     call restore_state(dirs%input_filename, dirs%restart_input_dir, Time, &
                        G, CS%restart_CSp)
    
-
-
     ! i think this call isnt necessary - all it does is set hmask to 3 at
     ! the dirichlet boundary, and now this is done elsewhere
     !  call initialize_shelf_mass(G, param_file, CS, .false.)
