@@ -771,9 +771,9 @@ subroutine shelf_calc_flux(state, fluxes, Time, time_step, CS)
 
   ! CS%lprec = precipitating liquid water into the ocean ( kg/(m^2 s) )
   ! melt in m/year 
-  !fluxes%iceshelf_melt = CS%lprec  * (86400.0*365.0/CS%density_ice)
+  fluxes%iceshelf_melt = CS%lprec  * (86400.0*365.0/CS%density_ice)
   ! Use rhoefw for ISOMIP experiments
-  fluxes%iceshelf_melt = CS%lprec  * (86400.0*365.0/rho_fw)
+  !fluxes%iceshelf_melt = CS%lprec  * (86400.0*365.0/rho_fw)
 
   do j=js,je
     do i=is,ie

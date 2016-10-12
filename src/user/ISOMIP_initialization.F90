@@ -428,6 +428,7 @@ subroutine ISOMIP_initialize_sponges(G, GV, tv, PF, use_ALE, CSp, ACSp)
   real      :: S_bot, T_bot;        ! Bottom salinity and temerature in sponge 
   real      :: t_ref, s_ref         ! reference T and S
   real      :: rho_sur, rho_bot, rho_range, t_range, s_range
+  real      :: temp_offset
 
   real :: e0(SZK_(G)+1)               ! The resting interface heights, in m, usually !
                                     ! negative because it is positive upward.      !
@@ -612,6 +613,9 @@ subroutine ISOMIP_initialize_sponges(G, GV, tv, PF, use_ALE, CSp, ACSp)
        call get_param(PF, mod, "ISOMIP_SPONGE_FILE", state_file, &
                  "The name of the file with temps., salts. and interfaces to \n"// &
                  " damp toward.", fail_if_missing=.true.)
+       call get_param(PF, mod, "ISOMIP_SPONGE_TEMP_OFFSET", temp_offset, &
+                 "Offsets temperature by offset value (deg( \n" // & 
+                 "(layer mode only).", default=0.0)
        call get_param(PF, mod, "SPONGE_PTEMP_VAR", temp_var, &
                  "The name of the potential temperature variable in \n"//&
                  "SPONGE_STATE_FILE.", default="Temp")
@@ -629,6 +633,10 @@ subroutine ISOMIP_initialize_sponges(G, GV, tv, PF, use_ALE, CSp, ACSp)
        call read_data(filename,eta_var,eta(:,:,:), domain=G%Domain%mpp_domain)
        call read_data(filename,temp_var,T(:,:,:), domain=G%Domain%mpp_domain)
        call read_data(filename,salt_var,S(:,:,:), domain=G%Domain%mpp_domain)
+
+        if (.not. (temp_offset==0.0)) then
+          T(:,:,:)=T(:,:,:)+temp_offset
+        endif
 
        ! for debugging
        !i=G%iec; j=G%jec
